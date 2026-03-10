@@ -44,6 +44,12 @@ public class DynamicHlsController : BaseJellyfinApiController
     private const EncoderPreset DefaultEventEncoderPreset = EncoderPreset.superfast;
     private const TranscodingJobType TranscodingJobType = MediaBrowser.Controller.MediaEncoding.TranscodingJobType.Hls;
 
+    /// <summary>
+    /// Maximum muxer delay in microseconds before the first HLS segment is flushed.
+    /// Lower values reduce initial playback latency (time to first segment).
+    /// </summary>
+    internal const int HlsMaxDelayMicroseconds = 500_000;
+
     private readonly Version _minFFmpegFlacInMp4 = new Version(6, 0);
     private readonly Version _minFFmpegX265BframeInFmp4 = new Version(7, 0, 1);
     private readonly Version _minFFmpegHlsSegmentOptions = new Version(5, 0);
@@ -1633,7 +1639,7 @@ public class DynamicHlsController : BaseJellyfinApiController
 
         return string.Format(
             CultureInfo.InvariantCulture,
-            "{0} {1} -map_metadata -1 -map_chapters -1 -threads {2} {3} {4} {5} -copyts -avoid_negative_ts disabled -max_muxing_queue_size {6} -f hls -max_delay 5000000 -hls_time {7} -hls_segment_type {8} -start_number {9}{10} -hls_segment_filename \"{11}\" {12} -y \"{13}\"",
+            "{0} {1} -map_metadata -1 -map_chapters -1 -threads {2} {3} {4} {5} -copyts -avoid_negative_ts disabled -max_muxing_queue_size {6} -f hls -max_delay {14} -hls_time {7} -hls_segment_type {8} -start_number {9}{10} -hls_segment_filename \"{11}\" {12} -y \"{13}\"",
             inputModifier,
             _encodingHelper.GetInputArgument(state, _encodingOptions, segmentContainer),
             threads,
@@ -1647,7 +1653,8 @@ public class DynamicHlsController : BaseJellyfinApiController
             baseUrlParam,
             EncodingUtils.NormalizePath(outputTsArg),
             hlsArguments,
-            EncodingUtils.NormalizePath(outputPath)).Trim();
+            EncodingUtils.NormalizePath(outputPath),
+            HlsMaxDelayMicroseconds.ToString(CultureInfo.InvariantCulture)).Trim();
     }
 
     /// <summary>

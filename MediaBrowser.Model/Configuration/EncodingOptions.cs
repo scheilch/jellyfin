@@ -52,8 +52,8 @@ public class EncodingOptions
         // Enhanced Nvdec or system native decoder is required for DoVi to SDR tone-mapping.
         EnableEnhancedNvdecDecoder = true;
         PreferSystemNativeHwDecoder = true;
-        EnableIntelLowPowerH264HwEncoder = false;
-        EnableIntelLowPowerHevcHwEncoder = false;
+        EnableIntelLowPowerH264HwEncoder = true;
+        EnableIntelLowPowerHevcHwEncoder = true;
         EnableHardwareEncoding = true;
         AllowHevcEncoding = false;
         AllowAv1Encoding = false;
