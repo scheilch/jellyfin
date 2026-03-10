@@ -61,6 +61,18 @@ namespace MediaBrowser.Controller.MediaEncoding
         /// </summary>
         internal const int VppQsvAsyncDepth = 4;
 
+        /// <summary>
+        /// NVENC high-quality tuning parameters.
+        /// AQ (adaptive quantization) and rc-lookahead are HW-accelerated on Pascal+ (GTX 10xx and newer).
+        /// </summary>
+        internal const string NvencHqTuneParams = " -tune hq -rc vbr -rc-lookahead 20 -spatial_aq 1 -temporal_aq 1";
+
+        /// <summary>
+        /// Maxrate multiplier for VBR-capable HW encoders (NVENC, AMF, VAAPI iHD).
+        /// 1.5× gives enough headroom for complex scenes without blowing bandwidth budgets.
+        /// </summary>
+        internal const double HwVbrMaxrateFactor = 1.5;
+
         private const string QsvAlias = "qs";
         private const string VaapiAlias = "va";
         private const string D3d11vaAlias = "dx11";
@@ -1614,8 +1626,10 @@ namespace MediaBrowser.Controller.MediaEncoding
                 || string.Equals(videoCodec, "hevc_amf", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(videoCodec, "av1_amf", StringComparison.OrdinalIgnoreCase))
             {
-                // Override the too high default qmin 18 in transcoding preset
-                return FormattableString.Invariant($" -rc cbr -qmin 0 -qmax 32 -b:v {bitrate} -maxrate {bitrate} -bufsize {bufsize}");
+                // VBR with vbr_peak allows bitrate to exceed target temporarily for complex scenes.
+                // qmax=51 gives the encoder full quantizer range for easy scenes (more bit savings).
+                int amfMaxrate = (int)Math.Min((long)bitrate * 3 / 2, int.MaxValue);
+                return FormattableString.Invariant($" -rc vbr_peak -qmin 0 -qmax 51 -b:v {bitrate} -maxrate {amfMaxrate} -bufsize {bufsize}");
             }
 
             if (string.Equals(videoCodec, "h264_vaapi", StringComparison.OrdinalIgnoreCase)
@@ -1628,7 +1642,18 @@ namespace MediaBrowser.Controller.MediaEncoding
                     return FormattableString.Invariant($" -rc_mode CBR -b:v {bitrate} -maxrate {bitrate} -bufsize {bufsize}");
                 }
 
-                return FormattableString.Invariant($" -rc_mode VBR -b:v {bitrate} -maxrate {bitrate} -bufsize {bufsize}");
+                // iHD VBR: maxrate headroom gives complex scenes room to breathe.
+                int vaapiMaxrate = (int)Math.Min((long)bitrate * 3 / 2, int.MaxValue);
+                return FormattableString.Invariant($" -rc_mode VBR -b:v {bitrate} -maxrate {vaapiMaxrate} -bufsize {bufsize}");
+            }
+
+            if (string.Equals(videoCodec, "h264_nvenc", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(videoCodec, "hevc_nvenc", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(videoCodec, "av1_nvenc", StringComparison.OrdinalIgnoreCase))
+            {
+                // True VBR needs maxrate > bitrate to breathe.
+                int nvencMaxrate = (int)Math.Min((long)bitrate * 3 / 2, int.MaxValue);
+                return FormattableString.Invariant($" -b:v {bitrate} -maxrate {nvencMaxrate} -bufsize {bufsize}");
             }
 
             if (string.Equals(videoCodec, "h264_videotoolbox", StringComparison.OrdinalIgnoreCase)
@@ -1741,6 +1766,9 @@ namespace MediaBrowser.Controller.MediaEncoding
                         EncoderPreset.faster => " -preset p2",
                         _ => " -preset p1"
                 };
+
+                // AQ + lookahead: HW-accelerated on Pascal+ (GTX 10xx and newer), near-zero CPU cost.
+                param += NvencHqTuneParams;
             }
             else if (string.Equals(videoEncoder, "h264_amf", StringComparison.OrdinalIgnoreCase) // h264 (h264_amf)
                         || string.Equals(videoEncoder, "hevc_amf", StringComparison.OrdinalIgnoreCase) // hevc (hevc_amf)
@@ -1968,6 +1996,14 @@ namespace MediaBrowser.Controller.MediaEncoding
                      || string.Equals(codec, "av1_vaapi", StringComparison.OrdinalIgnoreCase))
             {
                 args += keyFrameArg;
+
+                // VAAPI may insert scene-cut keyframes without GOP limit, so add gopArg too.
+                if (string.Equals(codec, "h264_vaapi", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(codec, "hevc_vaapi", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(codec, "av1_vaapi", StringComparison.OrdinalIgnoreCase))
+                {
+                    args += gopArg;
+                }
 
                 // prevent the libx264 from post processing to break the set keyframe.
                 if (string.Equals(codec, "libx264", StringComparison.OrdinalIgnoreCase))

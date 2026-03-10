@@ -176,4 +176,114 @@ public class EncodingHelperTests
     {
         Assert.Equal(4, EncodingHelper.VppQsvAsyncDepth);
     }
+
+    // -- Finding #3: NVENC AQ + lookahead --
+
+    [Fact]
+    public void NvencHqTuneParams_ContainsSpatialAq()
+    {
+        Assert.Contains("-spatial_aq 1", EncodingHelper.NvencHqTuneParams, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NvencHqTuneParams_ContainsTemporalAq()
+    {
+        Assert.Contains("-temporal_aq 1", EncodingHelper.NvencHqTuneParams, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NvencHqTuneParams_ContainsRcLookahead()
+    {
+        Assert.Contains("-rc-lookahead 20", EncodingHelper.NvencHqTuneParams, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NvencHqTuneParams_ContainsVbrRc()
+    {
+        Assert.Contains("-rc vbr", EncodingHelper.NvencHqTuneParams, StringComparison.Ordinal);
+    }
+
+    // -- Finding #4: NVENC VBR maxrate headroom --
+
+    [Fact]
+    public void GetVideoBitrateParam_Nvenc_MaxrateExceedsBitrate()
+    {
+        var state = CreateJobInfo(5_000_000);
+        var result = _encodingHelper.GetVideoBitrateParam(state, "h264_nvenc");
+        // maxrate should be 1.5x bitrate = 7500000
+        Assert.Contains("-maxrate 7500000", result, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GetVideoBitrateParam_Av1Nvenc_MaxrateExceedsBitrate()
+    {
+        var state = CreateJobInfo(10_000_000);
+        var result = _encodingHelper.GetVideoBitrateParam(state, "av1_nvenc");
+        Assert.Contains("-maxrate 15000000", result, StringComparison.Ordinal);
+    }
+
+    // -- Finding #7 (Tier 3): AMF VBR instead of CBR --
+
+    [Fact]
+    public void GetVideoBitrateParam_Amf_UsesVbrPeak()
+    {
+        var state = CreateJobInfo(5_000_000);
+        var result = _encodingHelper.GetVideoBitrateParam(state, "h264_amf");
+        Assert.Contains("-rc vbr_peak", result, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GetVideoBitrateParam_Amf_MaxrateExceedsBitrate()
+    {
+        var state = CreateJobInfo(5_000_000);
+        var result = _encodingHelper.GetVideoBitrateParam(state, "h264_amf");
+        Assert.Contains("-maxrate 7500000", result, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GetVideoBitrateParam_Amf_HasQmax51()
+    {
+        var state = CreateJobInfo(5_000_000);
+        var result = _encodingHelper.GetVideoBitrateParam(state, "hevc_amf");
+        Assert.Contains("-qmax 51", result, StringComparison.Ordinal);
+    }
+
+    // -- Finding #8: VAAPI VBR maxrate headroom --
+
+    [Fact]
+    public void GetVideoBitrateParam_VaapiIhd_MaxrateExceedsBitrate()
+    {
+        var state = CreateJobInfo(5_000_000);
+        var result = _encodingHelper.GetVideoBitrateParam(state, "h264_vaapi");
+        // iHD mock returns false for IsVaapiDeviceInteli965 → VBR path
+        Assert.Contains("-maxrate 7500000", result, StringComparison.Ordinal);
+    }
+
+    // -- Finding #13: VAAPI HLS GOP limit --
+
+    [Fact]
+    public void GetHlsVideoKeyFrameArguments_Vaapi_ContainsGopArg()
+    {
+        var state = new EncodingJobInfo(TranscodingJobType.Progressive)
+        {
+            BaseRequest = new BaseEncodingJobOptions(),
+            VideoStream = new MediaStream { RealFrameRate = 30 }
+        };
+        var result = _encodingHelper.GetHlsVideoKeyFrameArguments(state, "h264_vaapi", 6, false, null);
+        // force_key_frames AND gopArg should both be present
+        Assert.Contains("-force_key_frames", result, StringComparison.Ordinal);
+        Assert.Contains("-g:v:0 180", result, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GetHlsVideoKeyFrameArguments_HevcVaapi_ContainsGopArg()
+    {
+        var state = new EncodingJobInfo(TranscodingJobType.Progressive)
+        {
+            BaseRequest = new BaseEncodingJobOptions(),
+            VideoStream = new MediaStream { RealFrameRate = 24 }
+        };
+        var result = _encodingHelper.GetHlsVideoKeyFrameArguments(state, "hevc_vaapi", 6, false, null);
+        Assert.Contains("-g:v:0 144", result, StringComparison.Ordinal);
+    }
 }
