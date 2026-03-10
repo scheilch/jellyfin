@@ -48,6 +48,19 @@ namespace MediaBrowser.Controller.MediaEncoding
 
         private const string _defaultMjpegEncoder = "mjpeg";
 
+        /// <summary>
+        /// x264 encoding options for real-time streaming.
+        /// rc_lookahead=25 gives the encoder enough frames to make better rate-control decisions
+        /// with minimal added latency.
+        /// </summary>
+        internal const string X264Opts = "subme=0:me_range=16:rc_lookahead=25:me=hex:open_gop=0";
+
+        /// <summary>
+        /// Async depth for VPP QSV filter pipeline.
+        /// Higher values (4) allow more frames in-flight for better GPU utilisation.
+        /// </summary>
+        internal const int VppQsvAsyncDepth = 4;
+
         private const string QsvAlias = "qs";
         private const string VaapiAlias = "va";
         private const string D3d11vaAlias = "dx11";
@@ -2075,6 +2088,15 @@ namespace MediaBrowser.Controller.MediaEncoding
             {
                 param += " -async_depth 1";
             }
+            else if (hardwareAccelerationType == HardwareAccelerationType.qsv
+                && (string.Equals(videoEncoder, "h264_qsv", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(videoEncoder, "hevc_qsv", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(videoEncoder, "av1_qsv", StringComparison.OrdinalIgnoreCase)))
+            {
+                // Increase pipeline depth for better GPU utilization.
+                // Default is 4; on CoffeeLake+ setting to 8 keeps the encoder saturated.
+                param += " -async_depth 8";
+            }
 
             var isLibX265 = string.Equals(videoEncoder, "libx265", StringComparison.OrdinalIgnoreCase);
             var encodingPreset = encodingOptions.EncoderPreset;
@@ -2277,7 +2299,7 @@ namespace MediaBrowser.Controller.MediaEncoding
 
             if (string.Equals(videoEncoder, "libx264", StringComparison.OrdinalIgnoreCase))
             {
-                param += " -x264opts:0 subme=0:me_range=16:rc_lookahead=10:me=hex:open_gop=0";
+                param += " -x264opts:0 " + X264Opts;
             }
 
             if (string.Equals(videoEncoder, "libx265", StringComparison.OrdinalIgnoreCase))
@@ -4458,7 +4480,7 @@ namespace MediaBrowser.Controller.MediaEncoding
 
                     if (doVppProcamp)
                     {
-                        procampParamsString += ":procamp=1:async_depth=2";
+                        procampParamsString += $":procamp=1:async_depth={VppQsvAsyncDepth}";
                         procampParams = string.Format(
                             CultureInfo.InvariantCulture,
                             procampParamsString,
@@ -4519,7 +4541,7 @@ namespace MediaBrowser.Controller.MediaEncoding
                 // hw tonemap(w/ procamp)
                 if (doVppTonemap && twoPassVppTonemap)
                 {
-                    mainFilters.Add("vpp_qsv=tonemap=1:format=nv12:async_depth=2");
+                    mainFilters.Add($"vpp_qsv=tonemap=1:format=nv12:async_depth={VppQsvAsyncDepth}");
                 }
 
                 // force bt709 just in case vpp tonemap is not triggered or using MSDK instead of VPL.
@@ -7094,11 +7116,39 @@ namespace MediaBrowser.Controller.MediaEncoding
 
             if (threads <= 0)
             {
-                // Automatically set thread count
+                // HW encoders don't benefit from FFmpeg thread parallelism.
+                // Use 1 thread (muxing only) to reduce CPU overhead.
+                if (!string.IsNullOrEmpty(outputVideoCodec)
+                    && (outputVideoCodec.Contains("qsv", StringComparison.OrdinalIgnoreCase)
+                        || outputVideoCodec.Contains("nvenc", StringComparison.OrdinalIgnoreCase)
+                        || outputVideoCodec.Contains("vaapi", StringComparison.OrdinalIgnoreCase)
+                        || outputVideoCodec.Contains("amf", StringComparison.OrdinalIgnoreCase)
+                        || outputVideoCodec.Contains("videotoolbox", StringComparison.OrdinalIgnoreCase)))
+                {
+                    return 1;
+                }
+
+                // Automatically set thread count for software encoders
                 return 0;
             }
 
             return Math.Min(threads, Environment.ProcessorCount);
+        }
+
+        /// <summary>
+        /// Builds explicit GOP size arguments for HW encoders that may ignore force_key_frames.
+        /// </summary>
+        /// <param name="frameRate">The real framerate of the source, or null.</param>
+        /// <returns>FFmpeg args string (with leading space) or empty.</returns>
+        internal static string GetProgressiveGopArguments(float? frameRate)
+        {
+            if (!frameRate.HasValue)
+            {
+                return string.Empty;
+            }
+
+            var gopSize = (int)Math.Ceiling(5 * frameRate.Value);
+            return FormattableString.Invariant($" -g:v:0 {gopSize} -keyint_min:v:0 {gopSize}");
         }
 
 #nullable disable
@@ -7612,6 +7662,10 @@ namespace MediaBrowser.Controller.MediaEncoding
                     5);
 
                 args += keyFrameArg;
+
+                // HW encoders may ignore force_key_frames, so also set GOP size explicitly
+                // for reliable seeking in progressive downloads.
+                args += GetProgressiveGopArguments(state.VideoStream?.RealFrameRate);
 
                 var hasGraphicalSubs = state.SubtitleStream is not null && !state.SubtitleStream.IsTextSubtitleStream && ShouldEncodeSubtitle(state);
 
