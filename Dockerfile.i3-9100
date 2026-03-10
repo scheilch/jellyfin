@@ -1,0 +1,32 @@
+# ─────────────────────────────────────────────────────────────
+# Jellyfin i3-9100 Optimised Image
+# Base: jellyfin/jellyfin:latest (Debian, ffmpeg 7.x, QSV/VAAPI)
+# Overlay: .NET 10 ASP.NET Core runtime + Tier 2 QSV-optimised build
+# ─────────────────────────────────────────────────────────────
+FROM jellyfin/jellyfin:latest
+
+# Preserve jellyfin-web, replace server binaries
+RUN mv /jellyfin/jellyfin-web /tmp/jellyfin-web \
+    && rm -rf /jellyfin/* \
+    && mv /tmp/jellyfin-web /jellyfin/jellyfin-web
+
+# Install .NET 10 ASP.NET Core runtime (server targets net10.0)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends wget ca-certificates \
+    && wget -q https://dot.net/v1/dotnet-install.sh -O /tmp/dotnet-install.sh \
+    && chmod +x /tmp/dotnet-install.sh \
+    && /tmp/dotnet-install.sh --channel 10.0 --runtime aspnetcore --install-dir /usr/share/dotnet \
+    && rm /tmp/dotnet-install.sh \
+    && apt-get remove -y wget \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy published server binaries (Tier 2 optimised)
+COPY publish/ /jellyfin/
+
+# Ensure dotnet is on PATH
+ENV PATH="/usr/share/dotnet:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+EXPOSE 8096 8920
+
+ENTRYPOINT ["dotnet", "/jellyfin/jellyfin.dll"]

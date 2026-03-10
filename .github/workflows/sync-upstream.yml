@@ -1,0 +1,173 @@
+name: Sync Upstream & Build Image
+
+on:
+  schedule:
+    # Every day at 04:00 UTC
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: 'Force rebuild even without upstream changes'
+        required: false
+        default: 'false'
+        type: boolean
+
+permissions:
+  contents: write
+  packages: write
+  issues: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/jellyfin-i3-9100
+  RELEASE_BRANCH: release/i3-9100
+  UPSTREAM_REPO: jellyfin/jellyfin
+
+jobs:
+  sync-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_BRANCH }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git || true
+          git fetch upstream master --tags
+
+      - name: Check for upstream changes
+        id: check_changes
+        run: |
+          UPSTREAM_SHA=$(git rev-parse upstream/master)
+          # Find the merge-base between our branch and upstream
+          MERGE_BASE=$(git merge-base HEAD upstream/master 2>/dev/null || echo "none")
+          
+          if [ "$MERGE_BASE" = "$UPSTREAM_SHA" ] && [ "${{ inputs.force_rebuild }}" != "true" ]; then
+            echo "No upstream changes detected."
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Upstream changes detected (merge-base: ${MERGE_BASE:0:12}, upstream: ${UPSTREAM_SHA:0:12})"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            echo "upstream_sha=${UPSTREAM_SHA}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rebase on upstream master
+        id: rebase
+        if: steps.check_changes.outputs.has_changes == 'true'
+        run: |
+          echo "Attempting rebase on upstream/master..."
+          if git rebase upstream/master; then
+            echo "rebase_ok=true" >> "$GITHUB_OUTPUT"
+            echo "Rebase successful."
+          else
+            git rebase --abort
+            echo "rebase_ok=false" >> "$GITHUB_OUTPUT"
+            echo "Rebase failed - conflicts detected."
+          fi
+
+      - name: Create conflict issue
+        if: steps.rebase.outputs.rebase_ok == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const upstream_sha = '${{ steps.check_changes.outputs.upstream_sha }}';
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `⚠️ Upstream sync conflict - manual rebase needed`,
+              body: `## Upstream Sync Conflict\n\n` +
+                    `The automated rebase of \`${process.env.RELEASE_BRANCH}\` onto upstream/master failed due to merge conflicts.\n\n` +
+                    `**Upstream commit:** \`${upstream_sha}\`\n` +
+                    `**Branch:** \`${process.env.RELEASE_BRANCH}\`\n\n` +
+                    `### Manual Resolution\n` +
+                    `\`\`\`bash\n` +
+                    `git fetch upstream master\n` +
+                    `git checkout ${process.env.RELEASE_BRANCH}\n` +
+                    `git rebase upstream/master\n` +
+                    `# Resolve conflicts, then:\n` +
+                    `git rebase --continue\n` +
+                    `git push origin ${process.env.RELEASE_BRANCH} --force-with-lease\n` +
+                    `\`\`\`\n\n` +
+                    `After resolving, trigger a manual rebuild via Actions → Sync Upstream & Build Image → Run workflow.`,
+              labels: ['upstream-sync', 'conflict']
+            });
+
+      - name: Push rebased branch
+        if: steps.rebase.outputs.rebase_ok == 'true'
+        run: |
+          git push origin ${{ env.RELEASE_BRANCH }} --force-with-lease
+
+      # ── Build & Push Docker Image ──────────────────────────────────
+      - name: Setup .NET
+        if: steps.rebase.outputs.rebase_ok == 'true' || inputs.force_rebuild == 'true'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+          dotnet-quality: 'preview'
+
+      - name: Publish Jellyfin Server
+        if: steps.rebase.outputs.rebase_ok == 'true' || inputs.force_rebuild == 'true'
+        run: |
+          dotnet publish Jellyfin.Server/Jellyfin.Server.csproj \
+            --configuration Release \
+            --output ./publish \
+            --self-contained false \
+            -p:DebugSymbols=false \
+            -p:DebugType=none
+
+      - name: Set up Docker Buildx
+        if: steps.rebase.outputs.rebase_ok == 'true' || inputs.force_rebuild == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: steps.rebase.outputs.rebase_ok == 'true' || inputs.force_rebuild == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image metadata
+        if: steps.rebase.outputs.rebase_ok == 'true' || inputs.force_rebuild == 'true'
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value={{date 'YYYYMMDD'}}-{{sha}}
+            type=sha,prefix=
+
+      - name: Build and push Docker image
+        if: steps.rebase.outputs.rebase_ok == 'true' || inputs.force_rebuild == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.i3-9100
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Sync Upstream & Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.check_changes.outputs.has_changes }}" = "false" ]; then
+            echo "✅ No upstream changes - skipped build" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ steps.rebase.outputs.rebase_ok }}" = "false" ]; then
+            echo "❌ Rebase conflict - GitHub issue created for manual resolution" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ Upstream synced and image pushed to \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+          fi
