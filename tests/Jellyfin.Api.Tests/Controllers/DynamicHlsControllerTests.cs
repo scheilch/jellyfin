@@ -41,5 +41,15 @@ namespace Jellyfin.Api.Tests.Controllers
 
             return data;
         }
+
+        /// <summary>
+        /// HLS max_delay should be 500ms (500000µs) for fast initial playback.
+        /// Previously was 5000000 (5s), causing slow first-segment flush.
+        /// </summary>
+        [Fact]
+        public void HlsMaxDelayMicroseconds_Is500ms()
+        {
+            Assert.Equal(500_000, DynamicHlsController.HlsMaxDelayMicroseconds);
+        }
     }
 }
