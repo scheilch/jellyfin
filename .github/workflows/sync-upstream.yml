@@ -101,6 +101,21 @@ jobs:
               labels: ['upstream-sync', 'conflict']
             });
 
+      - name: Remove upstream workflow files
+        if: steps.rebase.outputs.rebase_ok == 'true'
+        run: |
+          # GITHUB_TOKEN cannot push workflow file changes (no 'workflows' permission).
+          # Remove any upstream workflow files that were added during rebase,
+          # keeping only our own sync-upstream.yml.
+          UPSTREAM_WF=$(find .github/workflows/ -type f \( -name '*.yml' -o -name '*.yaml' \) ! -name 'sync-upstream.yml' 2>/dev/null || true)
+          if [ -n "$UPSTREAM_WF" ]; then
+            echo "Removing upstream workflow files: $UPSTREAM_WF"
+            echo "$UPSTREAM_WF" | xargs git rm -f
+            git commit -m "chore: remove upstream workflow files (GITHUB_TOKEN limitation)"
+          else
+            echo "No upstream workflow files to remove."
+          fi
+
       - name: Push rebased branch
         if: steps.rebase.outputs.rebase_ok == 'true'
         run: |
